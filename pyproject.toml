@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bbr-buttonboard"
+dynamic = ["version"]
+description = "Drive a BBR Button Board's LEDs, displays and bindings from the Driver Station laptop"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+authors = [{ name = "Building Block Robotics" }]
+keywords = ["FRC", "FTC", "FIRST", "robotics", "driver station", "button box"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Education",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Hardware",
+]
+dependencies = ["pyserial>=3.4"]
+
+[project.optional-dependencies]
+pictures = ["pillow"]
+networktables = ["pyntcore"]
+
+[project.scripts]
+bbctl = "buttonboard.bbctl:main"
+
+[project.urls]
+Documentation = "https://buttonboard.buildingblockrobotics.com/driver-station/install.html"
+Source = "https://github.com/BuildingBlockRobotics/BBRButtonBoard"
+Homepage = "https://bbrbuttonboard.com/"
+
+[tool.hatch.version]
+path = "src/buttonboard/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/buttonboard"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [".github"]

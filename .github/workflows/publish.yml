@@ -1,0 +1,26 @@
+name: Publish to PyPI
+
+# A tag vX.Y.Z publishes that version. The tag must match __version__.
+# PyPI trusts this workflow by name (trusted publishing), so no token is stored.
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install build
+      - run: python -m build
+      - name: Tag matches the package version
+        run: |
+          v=$(python -c "import re; print(re.search(r'__version__ = \"(.+)\"', open('src/buttonboard/__init__.py').read()).group(1))")
+          test "v$v" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME, package $v"; exit 1; }
+      - run: python -m pip install dist/*.whl && python tests/test_buttonboard.py
+      - uses: pypa/gh-action-pypi-publish@release/v1
