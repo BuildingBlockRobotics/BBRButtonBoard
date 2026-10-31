@@ -79,8 +79,14 @@ class SerialTransport:
     def _read(self, on_line):
         buf = b""
         while not self._stop.is_set():
+            # Block for one byte, then take what has arrived. read(256) waited
+            # out the whole timeout on any reply shorter than 256 bytes, which
+            # is every reply: 100 ms on each command (IMPLEMENTATION.md §73).
             try:
-                buf += self._s.read(256)
+                chunk = self._s.read(1)
+                if chunk:
+                    chunk += self._s.read(self._s.in_waiting)
+                buf += chunk
             except Exception:                           # port yanked mid-read
                 self._stop.set()
                 break

@@ -248,6 +248,41 @@ off()
 board.inject({"ev": "tile", "addr": 3, "state": "online"})
 check("unsubscribed", len(seen), 1)
 
+
+# ---- the serial reader never waits out its timeout on a short reply ----------
+from buttonboard.transport import SerialTransport              # noqa: E402
+
+
+class _Port(object):
+    """pyserial's read(n) blocks until n bytes or the timeout. This one
+    records a read that would have blocked with data already waiting."""
+
+    def __init__(self, data, stop):
+        self.data, self.stop, self.stalls = bytearray(data), stop, 0
+
+    @property
+    def in_waiting(self):
+        return len(self.data)
+
+    def read(self, n):
+        if not self.data:
+            self.stop.set()
+            return b""
+        if n > len(self.data):
+            self.stalls += 1            # the real port would sit out its timeout
+        out = bytes(self.data[:n])
+        del self.data[:n]
+        return out
+
+
+_t = SerialTransport.__new__(SerialTransport)
+_t._stop = __import__("threading").Event()
+_t._s = _Port(b'{"ok":true}\n{"ev":"tile"}\n', _t._stop)
+_lines = []
+_t._read(_lines.append)
+check("reader delivers both lines", _lines, ['{"ok":true}', '{"ev":"tile"}'])
+check("reader never asks for more than is waiting", _t._s.stalls, 0)
+
 # ---- firmware transfer (§9.4) ---------------------------------------------
 from buttonboard import crc16_ccitt_false                       # noqa: E402
 
