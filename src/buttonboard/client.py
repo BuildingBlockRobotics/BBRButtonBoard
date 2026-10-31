@@ -31,9 +31,11 @@ FLASH_VERIFY_TIMEOUT = 6.0         # VERIFY, RESET, tile online again
 # flash, saying it has no room this cycle. Waiting slightly under a slot period
 # means a refused line goes out on the first cycle with room; bounded by
 # attempts rather than by wall clock, so a slow link fails on effort rather
-# than on the clock. 512 DATA lines is the case that needs it.
+# than on the clock. 512 DATA lines is the case that needs it. A try costs
+# about the wait once a reply comes back in a millisecond, so the tries cover
+# a 64 KB block erase at its 2 s datasheet worst case with room to spare.
 DISP_BUSY_WAIT = 0.005
-DISP_BUSY_TRIES = 400
+DISP_BUSY_TRIES = 1000
 
 
 def _int_in(name, value, low, high):
