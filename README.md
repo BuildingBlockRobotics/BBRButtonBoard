@@ -83,6 +83,12 @@ python tests/test_buttonboard.py
 
 No hardware and no pytest needed.
 
+## FTC (Java)
+
+[`ftc/`](https://github.com/BuildingBlockRobotics/BBRButtonBoard/tree/main/ftc) holds the Java helpers for an FTC OpMode: changing a screen
+key's legend mid-match with `gamepad.rumble()`, and reading a knob through a
+trigger. FTC teams copy the files into TeamCode; see [ftc/README.md](https://github.com/BuildingBlockRobotics/BBRButtonBoard/blob/main/ftc/README.md).
+
 ## About this repository
 
 This is a published copy of the library. It is developed alongside the
