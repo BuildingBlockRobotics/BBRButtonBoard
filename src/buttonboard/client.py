@@ -11,7 +11,7 @@ import queue
 import threading
 import time
 
-from . import display, leds, rumble, sound
+from . import display, draw, leds, rumble, sound
 from .crc import crc16_ccitt_false
 from .errors import CommandError, NotConnected, Timeout
 from .transport import SerialTransport
@@ -102,6 +102,7 @@ class Board(object):
         self._line_hooks = []
         self._caps = {}                # addr -> `caps` from §9.5, for disp_color
         self._slots = {}               # addr -> `slots` from §9.5, for §14.9
+        self._draws = {}               # addr -> `draw` from §9.5, for §14.10
         self._closed = False
         transport.start(self._on_line)
 
@@ -262,6 +263,7 @@ class Board(object):
         # capability cache behind `disp_color` is stale.
         self._caps.clear()
         self._slots.clear()
+        self._draws.clear()
         return self.command("replace %d %d" % (_int_in("old_addr", old_addr, 1, 31),
                                                _int_in("new_addr", new_addr, 1, 31)))
 
@@ -876,6 +878,141 @@ class Board(object):
         if show:
             return self.disp_slot_show(addr, slot)
         return response
+
+    # ---- streamed pictures, §14.8 ------------------------------------------
+
+    def disp_image(self, addr, row, data, attr=None, *, fg=None, bg=None, inverse=False):
+        """One IMAGE chunk: 1 bpp pixel rows straight at the panel, from `row`.
+
+        `data` is bytes or a hex str, a whole number of rows and at most 64
+        bytes. A set bit is the attribute's ink, a clear one its paper. There
+        is no commit: the rows appear as they arrive, and the picture owns the
+        panel until `disp_clear`. Prefer `disp_show_image`, which sends a
+        whole picture.
+        """
+        payload = data if isinstance(data, str) else bytes(data).hex().upper()
+        style = display.attr(attr, fg=fg, bg=bg, inverse=inverse)
+        if display.is_color(style) and self.disp_color(addr) is False:
+            raise ValueError(
+                "tile %d has no colour panel (no CAP_DISP_COLOR): it refuses "
+                "the colour bits rather than drawing white (§14.7)" % (addr,))
+        return self._disp("disp %d image %d %d %s" % (
+            _int_in("addr", addr, 1, 31), _int_in("row", row, 0, 255), style, payload))
+
+    def disp_show_image(self, addr, source, attr=None, *, fg=None, bg=None,
+                        inverse=False, invert=False, contain=True, on_progress=None):
+        """Stream a whole 1 bpp picture to the panel, nothing stored (§14.8).
+
+        `source` is an image file or Pillow image, dithered to the panel's
+        size, or the encoded bytes themselves (`display.encode_1bpp`). A full
+        160 x 128 screen is 43 chunks and about a quarter of a second of
+        auxiliary slot, every time -- right for a picture that changes, where
+        `disp_store_image` and a one-frame `disp_slot_show` are right for one
+        that does not. Two colours, the attribute's.
+        """
+        entry = self.tile(addr) or {}
+        px_w, px_h = entry.get("pxW"), entry.get("pxH")
+        if not px_w or not px_h:
+            raise ValueError("tile %d reports no pixel geometry, so it takes no "
+                             "pictures (§14.8)" % (addr,))
+        if isinstance(source, (bytes, bytearray, memoryview)):
+            data = bytes(source)
+        else:
+            data = display.picture_bytes(source, px_w, px_h, "1bpp",
+                                         invert=invert, contain=contain)
+        chunks = list(draw.image_chunks(data, px_w))
+        response = None
+        for i, (row, payload) in enumerate(chunks):
+            response = self.disp_image(addr, row, payload, attr,
+                                       fg=fg, bg=bg, inverse=inverse)
+            if on_progress is not None:
+                on_progress(i + 1, len(chunks))
+        return response
+
+    # ---- vector drawing, §14.10 --------------------------------------------
+
+    def disp_draws(self, addr, refresh=False):
+        """Does the tile at `addr` rasterise DRAW frames? `draw` in its §9.5
+        entry is the advertisement. Cached like `disp_color`."""
+        addr = _int_in("addr", addr, 1, 31)
+        if refresh or addr not in self._draws:
+            self._draws[addr] = bool((self.tile(addr) or {}).get("draw"))
+        return self._draws[addr]
+
+    @staticmethod
+    def _draw_colour(colour, raw):
+        if raw:
+            return _int_in("colour", colour, 0, 0xFFFF)
+        return draw.rgb565(colour)
+
+    def _draw(self, addr, what, colour, raw, values, group, most):
+        values = [tuple(int(v) for v in item) for item in values]
+        if not values or len(values) > most or any(len(v) != group for v in values):
+            raise ValueError("a DRAW %s frame carries 1-%d groups of %d numbers"
+                             % (what.upper(), most, group))
+        flat = [_int_in("coordinate", v, 0, 255) for item in values for v in item]
+        return self._disp("disp %d draw %s %04X %s" % (
+            _int_in("addr", addr, 1, 31), what, self._draw_colour(colour, raw),
+            "".join("%02X" % v for v in flat)))
+
+    def disp_draw_line(self, addr, colour, segments, *, raw=False):
+        """Up to 16 separate line segments in one colour, one frame (§14.10).
+
+            board.disp_draw_line(6, "red", [(0, 0, 159, 127), (0, 127, 159, 0)])
+
+        Each segment is `(x0, y0, x1, y1)` in pixels and must lie on the panel:
+        the tile refuses a point off the glass rather than clipping it.
+        `board.canvas(addr)` clips, batches and erases for you; this is the
+        frame underneath. `raw` takes the colour as an RGB565 value already.
+
+        Awaited, and re-sent while the tile answers `busy`: it NAKs a frame
+        until it has finished drawing the one before.
+        """
+        return self._draw(addr, "line", colour, raw, segments, 4, draw.LINE_MAX)
+
+    def disp_draw_poly(self, addr, colour, points, *, raw=False):
+        """One connected line through 2-32 `(x, y)` points, one frame. Half
+        the bytes of the same shape as separate segments; repeat the first
+        point at the end to close it."""
+        points = list(points)
+        if len(points) < 2:
+            raise ValueError("a polyline needs two points")
+        return self._draw(addr, "poly", colour, raw, points, 2, draw.POLY_MAX)
+
+    def disp_draw_fill(self, addr, colour, rects, *, raw=False):
+        """Up to 16 solid `(x, y, w, h)` rectangles in one colour, one frame.
+        The whole panel in black is how a drawing is cleared; a rectangle in
+        the background colour is how part of one is erased."""
+        return self._draw(addr, "fill", colour, raw, rects, 4, draw.FILL_MAX)
+
+    def disp_draw_text(self, addr, x, y, text, fg="white", bg="black", *, raw=False):
+        """Text at a pixel position, in the tile's 12 x 16 glyphs (§14.10).
+
+        Unlike `disp_text` this is not on the character grid and takes any two
+        colours, so it can label a drawing. Each glyph is a solid cell of `bg`;
+        every character has to fit on the panel.
+        """
+        text = display.ascii_text(text)
+        if not text:
+            raise ValueError("no text to draw")
+        return self._disp("disp %d draw text %04X %04X %d %d %s" % (
+            _int_in("addr", addr, 1, 31), self._draw_colour(fg, raw),
+            self._draw_colour(bg, raw), _int_in("x", x, 0, 255),
+            _int_in("y", y, 0, 255), text))
+
+    def disp_slot_rect(self, addr, slot, x, y, w, h):
+        """Put part of a stored picture back on the panel (§14.10): the
+        `w` x `h` pixels at (`x`, `y`). One frame, and how something drawn
+        over a stored background is taken off again."""
+        return self._disp("disp %d slot %d rect %d %d %d %d" % (
+            _int_in("addr", addr, 1, 31), _int_in("slot", slot, 0, 255),
+            _int_in("x", x, 0, 255), _int_in("y", y, 0, 255),
+            _int_in("w", w, 1, 255), _int_in("h", h, 1, 255)))
+
+    def canvas(self, addr, background="black", slot=None):
+        """A diffing scene on a drawing tile: `draw.Canvas`. Shapes go on
+        layers, and `flush()` sends only what changed."""
+        return draw.Canvas(self, addr, background=background, slot=slot)
 
     # ---- piezo sound, §16 (reserved: no tile has a sounder yet) ------------
 

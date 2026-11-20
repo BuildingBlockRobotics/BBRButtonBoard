@@ -17,6 +17,10 @@ Colour (§14.7) is said the way it reads out loud -- `"red on white"`, or
 Only a tile advertising `CAP_DISP_COLOR` accepts it: a mono panel refuses
 colour rather than drawing white, and this client refuses it first.
 
+A tile that reports `draw` (a `disp2`) rasterises lines itself (§14.10):
+`board.canvas(6)` gives layers of shapes and a `flush()` that sends only what
+changed. See `buttonboard.draw`.
+
 MockBoard speaks the same protocol in-process, which is how the display and
 sound halves are tested without hardware. `disp` is live (§14); `sound` is
 still reserved and the board answers `unknown` to it (§16). Its default chain
@@ -27,12 +31,13 @@ puts it on the glass in a single frame. `board.rumble_bind(1, 5, 0)` binds a
 legend code to that slot (§8.8), which is how a match-time `gamepad.rumble()`
 from an OpMode reaches a board that has no config channel at all.
 """
-__version__ = "0.1.1"
+__version__ = "0.2.0"
 
 from . import rumble
 from .client import Board, FLASH_CHUNK, MAX_LINE
 from .crc import crc16_ccitt_false, crc8_maxim
 from .display import COLORS, Screen, attr, picture_bytes
+from .draw import Canvas, Framebuffer, rgb565
 from .errors import (BoardError, CommandError, NoBoardFound, NotConnected,
                      Timeout)
 from .leds import FX, NAMED, LedLayer, rgb
@@ -43,7 +48,7 @@ from .transport import LoopTransport, SerialTransport, find_port
 
 __all__ = [
     "Board", "MockBoard", "Screen", "LedLayer", "attr", "COLORS",
-    "picture_bytes",
+    "picture_bytes", "Canvas", "Framebuffer", "rgb565",
     "SerialTransport", "LoopTransport", "find_port",
     "BoardError", "CommandError", "NoBoardFound", "NotConnected", "Timeout",
     "rgb", "FX", "NAMED", "TUNES", "MAX_LINE", "FLASH_CHUNK",
