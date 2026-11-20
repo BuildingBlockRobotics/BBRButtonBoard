@@ -58,6 +58,19 @@ print(board.state.leds)              # {('btn', 3): 'led 3 FF0000'}
 Only one program can have the board open at a time. Close the config app's
 browser tab before running a script, and the other way round.
 
+A `disp2` can draw lines, rectangles and text that move with the robot:
+
+```python
+canvas = board.canvas(6)
+wheel = canvas.layer()
+wheel.box(40, 14, 9, 19, heading, "lime")
+canvas.flush()                       # sends only what changed
+```
+
+`examples/` has four complete programs: a swerve drive, the robot on the
+field, and the REEFSCAPE reef from above and from the side. Each runs with `--demo` (no robot) and
+`--mock --png out.png` (no board either).
+
 ## bbctl
 
 Installing the package also installs `bbctl`, a console for the board's

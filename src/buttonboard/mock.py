@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 
-from . import display, rumble
+from . import display, draw, rumble
 from .client import Board
 from .crc import crc16_ccitt_false
 from .transport import LoopTransport
@@ -33,7 +33,7 @@ DEFAULT_TILES = [
     # are fields rather than capability bits, so their absence is the answer.
     {"addr": 5, "type": "screenkey1", "uid": "5C7E01", "fw": "0.1.0", "proto": 1,
      "keys": 1, "leds": 0, "enc": 0, "caps": 83, "state": "online",
-     "cols": 10, "rows": 8, "pxW": 128, "pxH": 128, "slots": 32,
+     "cols": 10, "rows": 8, "pxW": 128, "pxH": 128, "slots": 32, "draw": True,
      "crcErr": 0, "missed": 0, "lastSeen": 2, "pressed": [], "debounce": 8},
     # RGB builds of mx4 and mx1 are the same type with CAP_LEDS and an LED per
     # key (board_mx4.h, board_mx1.h): caps 7 = BOOTLOADER | DEBOUNCE | LEDS.
@@ -45,9 +45,10 @@ DEFAULT_TILES = [
      "crcErr": 0, "missed": 0, "lastSeen": 3, "pressed": [], "debounce": 5},
     # The 1.8" colour display (board_disp2.h): no keys, 160 x 128 landscape,
     # 13 x 8 cells of the 12x16 font, and a picture store like screenkey1's.
+    # `draw` is the §14.10 advertisement: both ST7735 tiles rasterise lines.
     {"addr": 6, "type": "disp2", "uid": "D2C0A9", "fw": "0.1.0", "proto": 1,
      "keys": 0, "leds": 0, "enc": 0, "caps": 83, "state": "online",
-     "cols": 13, "rows": 8, "pxW": 160, "pxH": 128, "slots": 32,
+     "cols": 13, "rows": 8, "pxW": 160, "pxH": 128, "slots": 32, "draw": True,
      "crcErr": 0, "missed": 0, "lastSeen": 2, "pressed": [], "debounce": 5},
 ]
 
@@ -75,6 +76,16 @@ class MockState(object):
         self.writing = None             # {"addr","slot","fmt","attr","data","last"}
         self.showing = {}               # addr -> the slot on the panel
         self.messages = {}              # addr -> the rows a rumble message put there
+        # The glass of each pixel tile, §14.8-§14.10: pictures and drawings
+        # land here exactly as the tile would put them, so a script's output
+        # can be looked at (`state.panel(addr).save("out.png")`) and asserted
+        # on a pixel at a time. The character grid is not rendered into it.
+        self.glass = {}                 # addr -> draw.Framebuffer
+        self.draws = []                 # every DRAW frame accepted: (addr, sub, ...)
+        # One `busy` for the frame after each DRAW, the way the tile NAKs
+        # until it has drawn the last one (§14.10). Off unless a test asks.
+        self.busy_after_draw = False
+        self._draw_busy_owed = False
         # One `busy` after each BEGIN, the way the flash NAKs while its erase
         # runs (§14.9). Deterministic so a test can prove the client retries
         # rather than treating backpressure as a failure.
@@ -95,6 +106,130 @@ class MockState(object):
         """The rows as they are on the panel: what the last SHOW committed."""
         rows = self.shown.get(addr, {})
         return [rows[k] for k in sorted(rows)]
+
+    def panel(self, addr):
+        """The glass of a pixel tile as a `draw.Framebuffer`, black to start."""
+        if addr not in self.glass:
+            tile = self._tile(addr) or {}
+            if not tile.get("pxW") or not tile.get("pxH"):
+                raise ValueError("tile %r has no pixel panel" % (addr,))
+            self.glass[addr] = draw.Framebuffer(tile["pxW"], tile["pxH"])
+        return self.glass[addr]
+
+    @staticmethod
+    def _ink_paper(attr):
+        """An ATTR's two colours as RGB565, the way skfont.c resolves them:
+        index 0 is white as ink and black as paper, and inverse swaps."""
+        palette = (0x0000, 0xF800, 0x07E0, 0xFFE0, 0x001F, 0xF81F, 0x07FF, 0xFFFF)
+        fg, bg = (attr >> 2) & 7, (attr >> 5) & 7
+        ink, paper = (palette[fg] if fg else 0xFFFF), palette[bg]
+        return (paper, ink) if attr & display.ATTR_INVERSE else (ink, paper)
+
+    def _paint_slot(self, addr, slot, x=0, y=0, w=None, h=None):
+        entry = self.slots[(addr, slot)]
+        glass = self.panel(addr)
+        if entry["fmt"] == "rgb565":
+            glass.blit_rgb565(entry["data"], x, y, w, h)
+        else:
+            ink, paper = self._ink_paper(entry["attr"])
+            glass.blit_1bpp(entry["data"], ink, paper, x, y, w,
+                            glass.height if h is None else h)
+
+    def _cmd_draw(self, addr, argv):
+        """`disp <addr> draw ...`, §14.10: what lineproto.c checks, checked
+        here, and the frame rasterised onto the tile's glass."""
+        tile = self._tile(addr) or {}
+        if not tile.get("draw") or len(argv) < 3:
+            raise _Err("args")
+        what = argv[0].lower()
+        pw, ph = tile["pxW"], tile["pxH"]
+
+        def colour(text):
+            if not 1 <= len(text) <= 4:
+                raise _Err("args")
+            try:
+                return int(text, 16)
+            except ValueError:
+                raise _Err("args")
+
+        c = colour(argv[1])
+        if self._draw_busy_owed:
+            self._draw_busy_owed = False
+            raise _Err("busy", nak=6)
+        glass = self.panel(addr)
+        if what == "text":
+            if len(argv) < 6:
+                raise _Err("args")
+            bg = colour(argv[2])
+            try:
+                x, y = int(argv[3]), int(argv[4])
+            except ValueError:
+                raise _Err("args")
+            text = _rest_after(self._raw, 8)
+            if (not text or len(text) > draw.TEXT_MAX or x < 0 or y < 0
+                    or x + len(text) * draw.GLYPH_W > pw or y + draw.GLYPH_H > ph
+                    or any(not 0x20 <= ord(ch) <= 0x7E for ch in text)):
+                raise _Err("args")
+            glass.text(x, y, text, c, bg)
+            self.draws.append((addr, "text", c, bg, x, y, text))
+        else:
+            if len(argv) != 3:
+                raise _Err("args")
+            if len(argv[2]) % 2 or not argv[2] or len(argv[2]) // 2 > draw.DRAW_MAX:
+                raise _Err("args")
+            try:
+                d = bytes.fromhex(argv[2])
+            except ValueError:
+                raise _Err("hex")
+            if what == "fill":
+                if len(d) % 4:
+                    raise _Err("args")
+                rects = [tuple(d[i:i + 4]) for i in range(0, len(d), 4)]
+                if any(not w or not h or x + w > pw or y + h > ph for x, y, w, h in rects):
+                    raise _Err("args")
+                for x, y, w, h in rects:
+                    glass.fill(x, y, w, h, c)
+                self.draws.append((addr, "fill", c, rects))
+            elif what in ("line", "poly"):
+                if len(d) < 4 or len(d) % (4 if what == "line" else 2):
+                    raise _Err("args")
+                pts = [(d[i], d[i + 1]) for i in range(0, len(d), 2)]
+                if any(x >= pw or y >= ph for x, y in pts):
+                    raise _Err("args")
+                if what == "poly":
+                    glass.poly(pts, c)
+                else:
+                    for i in range(0, len(pts), 2):
+                        glass.line(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1], c)
+                self.draws.append((addr, what, c, pts))
+            else:
+                raise _Err("args")
+        self._draw_busy_owed = self.busy_after_draw
+        return {"ok": True}
+
+    def _cmd_image(self, addr, argv):
+        """`disp <addr> image <row> <attr> <hex>`, §14.8."""
+        tile = self._tile(addr) or {}
+        if not tile.get("pxW") or len(argv) != 3:
+            raise _Err("args")
+        try:
+            row, attr = int(argv[0]), int(argv[1])
+        except ValueError:
+            raise _Err("args")
+        try:
+            d = bytes.fromhex(argv[2])
+        except ValueError:
+            raise _Err("hex")
+        stride = tile["pxW"] // 8
+        if (not d or len(d) > draw.IMAGE_MAX or len(d) % stride or not 0 <= attr <= 0xFF
+                or attr & display.ATTR_DOUBLE or row < 0
+                or row + len(d) // stride > tile["pxH"]):
+            raise _Err("args")
+        if display.is_color(attr) and not self._caps(addr) & display.CAP_DISP_COLOR:
+            raise _Err("args")
+        ink, paper = self._ink_paper(attr)
+        self.panel(addr).blit_1bpp(d, ink, paper, y=row, row0=row)
+        return {"ok": True}
 
     def _caps(self, addr):
         """The `caps` word of a tile, 0 for an address that holds none."""
@@ -487,6 +622,21 @@ class MockState(object):
             if (addr, slot) not in self.slots:
                 raise _Err("args")                  # SHOW on an empty slot
             self.showing[addr] = slot               # owns the panel until CLEAR
+            self._paint_slot(addr, slot)
+            return {"ok": True}
+
+        if op == "rect":
+            # Part of the stored picture, §14.10: advertised with DRAW.
+            if len(rest) != 4 or not tile.get("draw"):
+                raise _Err("args")
+            try:
+                x, y, w, h = (int(v) for v in rest)
+            except ValueError:
+                raise _Err("args")
+            if (x < 0 or y < 0 or w < 1 or h < 1 or x + w > tile["pxW"]
+                    or y + h > tile["pxH"] or (addr, slot) not in self.slots):
+                raise _Err("args")
+            self._paint_slot(addr, slot, x, y, w, h)
             return {"ok": True}
 
         if op == "info":
@@ -539,9 +689,15 @@ class MockState(object):
         rows = self.rows.setdefault(addr, {})
         if what == "slot":
             return self._cmd_slot(addr, argv[2:])
+        if what == "draw":
+            return self._cmd_draw(addr, argv[2:])
+        if what == "image":
+            return self._cmd_image(addr, argv[2:])
         if what == "clear":
             # CLEAR is what takes the panel back from a picture (§14.9).
             self.showing.pop(addr, None)
+            if addr in self.glass:
+                self.glass[addr].clear()
             rows.clear()
             self.attrs.pop(addr, None)
             self.shown[addr] = {}

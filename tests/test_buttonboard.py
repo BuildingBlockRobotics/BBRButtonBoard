@@ -889,6 +889,165 @@ check("pixel off", board.pixel(False)["pixel"], False)
 check("pixel off wire form", board.state.sent[-1], "pixel off")
 check("hello reports it", board.hello()["pixel"], False)
 
+# ---- streamed pictures, §14.8 --------------------------------------------------
+from buttonboard import Canvas, Framebuffer, rgb565            # noqa: E402
+from buttonboard import draw as _draw                           # noqa: E402
+
+board = MockBoard()
+# Four rows a chunk on a 128 px panel, three on a 160 px one: whole rows only.
+check("image chunks at 128 px", [r for r, _ in _draw.image_chunks(bytes(2048), 128)][:3], [0, 4, 8])
+check("image chunks at 160 px", [r for r, _ in _draw.image_chunks(bytes(2560), 160)][:3], [0, 3, 6])
+check("160 px: 43 chunks a screen", len(list(_draw.image_chunks(bytes(2560), 160))), 43)
+check_raises("image chunks: whole rows", ValueError, list, _draw.image_chunks(bytes(30), 160))
+board.disp_image(6, 3, bytes([0x80] + [0] * 19), "red")
+check("image wire form", board.state.sent[-1], "disp 6 image 3 4 80" + "00" * 19)
+check("a set bit is the ink", board.state.panel(6).pixel(0, 3), 0xF800)
+check("a clear bit is the paper", board.state.panel(6).pixel(1, 3), 0x0000)
+picture = bytes([0xFF] * 20 + [0x00] * 20) * 64
+board.disp_show_image(6, picture, fg="black", bg="yellow")
+check("a whole picture streams", sum(1 for l in board.state.sent if " image " in l), 44)
+check("its ink, from the attribute", board.state.panel(6).pixel(80, 0), 0x0000)
+check("its paper", board.state.panel(6).pixel(80, 127), 0xFFE0)
+check_raises("image on a tile with no pixels", ValueError, board.disp_show_image, 4, picture)
+
+# ---- vector drawing, §14.10 ----------------------------------------------------
+check("rgb565 red", rgb565("red"), 0xF800)
+check("rgb565 green", rgb565("#00ff00"), 0x07E0)
+check("rgb565 tuple", rgb565((0, 0, 255)), 0x001F)
+check("rgb565 orange", rgb565("orange"), 0xFC40)
+check("rgb565 off is black", rgb565(None), 0)
+
+board = MockBoard()
+check("a drawing tile says so", board.disp_draws(6), True)
+check("a mono tile does not", board.disp_draws(4), False)
+board.disp_draw_line(6, "red", [(0, 0, 159, 127), (0, 127, 159, 0)])
+check("line wire form", board.state.sent[-1], "disp 6 draw line F800 00009F7F007F9F00")
+check("line: both ends lit", (board.state.panel(6).pixel(0, 0),
+                              board.state.panel(6).pixel(159, 127)), (0xF800, 0xF800))
+board.disp_draw_poly(6, "#00FF00", [(10, 10), (20, 10), (20, 20)])
+check("poly wire form", board.state.sent[-1], "disp 6 draw poly 07E0 0A0A140A1414")
+check("poly: the corner", board.state.panel(6).pixel(20, 10), 0x07E0)
+board.disp_draw_fill(6, "blue", [(100, 100, 8, 4)])
+check("fill wire form", board.state.sent[-1], "disp 6 draw fill 001F 64640804")
+check("fill: inside and out", (board.state.panel(6).pixel(107, 103),
+                               board.state.panel(6).pixel(108, 103)), (0x001F, 0x0000))
+board.disp_draw_text(6, 4, 100, "L4 ok ", "yellow", "blue")
+check("text wire form keeps its spaces", board.state.sent[-1],
+      "disp 6 draw text FFE0 001F 4 100 L4 ok ")
+check("text: paper fills the cell", board.state.panel(6).pixel(4, 100), 0x001F)
+check("text: the L's stem is ink", board.state.panel(6).pixel(4, 104), 0xFFE0)
+board.disp_draw_fill(6, 0x1234, [(0, 0, 1, 1)], raw=True)
+check("raw is RGB565 already", board.state.sent[-1], "disp 6 draw fill 1234 00000101")
+check_raises("a point off the panel", CommandError, board.disp_draw_line, 6, "red", [(0, 0, 160, 0)])
+check_raises("a rectangle off the panel", CommandError, board.disp_draw_fill, 6, "red", [(156, 0, 8, 8)])
+check_raises("text that does not fit", CommandError, board.disp_draw_text, 6, 150, 0, "AB")
+check_raises("17 segments are two frames", ValueError, board.disp_draw_line, 6, "red",
+             [(0, 0, 1, 1)] * 17)
+check_raises("33 points are two frames", ValueError, board.disp_draw_poly, 6, "red",
+             [(0, 0)] * 33)
+check_raises("one point is not a line", ValueError, board.disp_draw_poly, 6, "red", [(0, 0)])
+check_raises("draw on a mono tile", CommandError, board.disp_draw_line, 4, "red", [(0, 0, 1, 1)])
+check_raises("a canvas on a mono tile", ValueError, board.canvas, 4)
+
+# `busy` is the tile still drawing the frame before: re-sent, not a failure.
+board = MockBoard()
+board.state.busy_after_draw = True
+board.disp_draw_fill(6, "black", [(0, 0, 160, 128)])
+board.disp_draw_line(6, "white", [(0, 0, 10, 10)])
+check("a busy frame is re-sent", [l for l in board.state.sent if " line " in l],
+      ["disp 6 draw line FFFF 00000A0A"] * 2)
+check("and drawn once", len([d for d in board.state.draws if d[1] == "line"]), 1)
+
+# Clipping happens here, because the tile refuses instead (§14.10).
+check("clip: inside is untouched", _draw.clip_segment(1, 2, 30, 40, 160, 128), (1, 2, 30, 40))
+check("clip: cut at the right edge", _draw.clip_segment(100, 10, 300, 10, 160, 128), (100, 10, 159, 10))
+check("clip: a diagonal keeps its slope", _draw.clip_segment(-10, -10, 20, 20, 160, 128), (0, 0, 20, 20))
+check("clip: wholly outside", _draw.clip_segment(200, 0, 300, 50, 160, 128), None)
+check("clip: a polyline breaks where it leaves",
+      _draw.clip_poly([(10, 10), (200, 10), (200, 50), (10, 50)], 160, 128),
+      [((10, 10), (159, 10)), ((159, 50), (10, 50))])
+check("clip: a rectangle", _draw.clip_rect(-4, 120, 10, 20, 160, 128), (0, 120, 6, 8))
+check("a long polyline carries on from its last point",
+      [len(f) for f in _draw.poly_frames([(i, 0) for i in range(70)])], [32, 32, 8])
+
+# The framebuffer steps a line as core/draw.c does: the same pixels from
+# either end, which is what makes "draw it again in black" an erase.
+fb = Framebuffer(64, 48)
+fb.line(3, 40, 60, 7, 1)
+there = list(fb.px)
+fb.clear()
+fb.line(60, 7, 3, 40, 1)
+check("a line is the same pixels both ways", fb.px, there)
+check("one pixel per step of the long axis", sum(fb.px), 58)
+fb.line(3, 40, 60, 7, 0)
+check("and drawn again in black it is gone", sum(fb.px), 0)
+check("a PNG comes out without Pillow", fb.png(1)[:8], b"\x89PNG\r\n\x1a\n")
+
+# Canvas: layers, and only what changed crosses the bus.
+board = MockBoard()
+canvas = board.canvas(6)
+check("geometry from the tile", (canvas.width, canvas.height), (160, 128))
+frame = canvas.layer().rect(30, 14, 100, 100, "white")
+wheel = canvas.layer().box(50, 34, 10, 22, 0, "green")
+check("first flush: clear, frame, wheel", canvas.flush(), 3)
+check("the clear is one fill of the panel", board.state.draws[0],
+      (6, "fill", 0, [(0, 0, 160, 128)]))
+check("a steady scene costs nothing", canvas.flush(), 0)
+glass = board.state.panel(6)
+check("the wheel is on the glass", glass.pixel(45, 23), 0x07E0)
+wheel.clear().box(50, 34, 10, 22, 90, "green")
+check("a moved shape: erase and redraw", canvas.flush(), 2)
+check("the old corner is gone", glass.pixel(45, 23), 0)
+check("the new one is there", glass.pixel(39, 29), 0x07E0)
+check("the frame was not touched", glass.pixel(30, 60), 0xFFFF)
+# An erase that cuts through something else puts it back.
+wheel.clear().box(30, 60, 10, 22, 0, "green")
+canvas.flush()
+wheel.clear()
+check("erasing over the frame redraws the frame", canvas.flush(), 2)
+check("the frame is whole again", [glass.pixel(30, y) for y in (50, 60, 70)], [0xFFFF] * 3)
+# A solid shape replaced by one that covers it is not erased first.
+marks = canvas.layer().fill(100, 90, 8, 8, "red")
+canvas.flush()
+marks.clear().fill(100, 90, 8, 8, "green")
+check("a marker changing colour is one frame", canvas.flush(), 1)
+check("and it changed", glass.pixel(104, 94), 0x07E0)
+# Lines of one colour share a frame; a new colour starts one.
+many = canvas.layer()
+for i in range(20):
+    many.line(2, 2 + i * 2, 20, 2 + i * 2, "cyan")
+many.line(2, 60, 20, 60, "red")
+check("20 lines + 1: two frames and a third", canvas.flush(), 3)
+# Shapes are cut to the panel rather than refused.
+edge = canvas.layer().box(158, 64, 20, 20, 30, "white").text(140, 4, "AB").fill(150, 120, 30, 30, "blue")
+canvas.flush()
+check("a clipped rectangle went out whole", board.state.draws[-1][3], [(150, 120, 10, 8)])
+check("text loses what does not fit", [d[6] for d in board.state.draws if d[1] == "text"], ["A"])
+# A tile that has been away comes back blank: forget, and everything goes again.
+before = len(board.state.draws)
+canvas.forget()
+check("after forget the whole scene is redrawn", canvas.flush() > 5, True)
+check("starting with the clear", board.state.draws[before][:3], (6, "fill", 0))
+
+# Over a stored picture, erasing is putting the picture back (§14.10).
+board = MockBoard()
+board.state.busy_after_begin = False
+field = bytes([0x07, 0xE0]) * (160 * 128)                   # a green field
+board.disp_slot_store(6, 2, field, "rgb565")
+canvas = board.canvas(6, slot=2)
+robot = canvas.layer().box(40, 40, 16, 16, 0, "white")
+check("first flush: show the slot, draw the robot", canvas.flush(), 2)
+check("the show", board.state.sent[-2], "disp 6 slot 2 show")
+glass = board.state.panel(6)
+check("field under robot", (glass.pixel(100, 100), glass.pixel(32, 32)), (0x07E0, 0xFFFF))
+robot.clear().box(80, 60, 16, 16, 45, "white")
+check("a move is one restore and one draw", canvas.flush(), 2)
+check("the restore names the old box", board.state.sent[-2], "disp 6 slot 2 rect 32 32 17 17")
+check("the field is back where the robot was", glass.pixel(32, 32), 0x07E0)
+check_raises("rect outside the panel", CommandError, board.disp_slot_rect, 6, 2, 150, 0, 20, 4)
+check_raises("rect of an empty slot", CommandError, board.disp_slot_rect, 6, 3, 0, 0, 4, 4)
+check_raises("rect on a tile that does not draw", CommandError, board.disp_slot_rect, 4, 0, 0, 0, 4, 4)
+
 
 def report(path=__file__):
     if fails:
