@@ -31,7 +31,7 @@ puts it on the glass in a single frame. `board.rumble_bind(1, 5, 0)` binds a
 legend code to that slot (§8.8), which is how a match-time `gamepad.rumble()`
 from an OpMode reaches a board that has no config channel at all.
 """
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 from . import rumble
 from .client import Board, FLASH_CHUNK, MAX_LINE

@@ -23,6 +23,9 @@ def _pyserial():
         raise BoardError("needs pyserial:  python3 -m pip install pyserial")
 
 VID, PID = 0x1209, 0x0001          # §8.4, still the pid.codes test PID
+# Every personality with a config channel has a PID of its own (§8.3): frc,
+# then desk, midi and sim. All pid.codes test PIDs until settled (§11).
+PIDS = (PID, 0x0002, 0x0003, 0x0004)
 
 
 def find_port():
@@ -32,7 +35,7 @@ def find_port():
 
     ports = list(list_ports.comports())
     for p in ports:
-        if p.vid == VID and p.pid == PID:
+        if p.vid == VID and p.pid in PIDS:
             return p.device
     for p in ports:
         # Substring, not equality: iProduct is "BBR Button Board" (PROTOCOL.md

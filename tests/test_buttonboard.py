@@ -47,6 +47,19 @@ check_raises("rgb range", ValueError, rgb, (0, 300, 0))
 
 # ---- command formatting -----------------------------------------------------
 board = MockBoard()
+for mode in ("frc", "xinput", "desk", "midi", "sim"):
+    board.usb(mode)
+    check("usb " + mode, board.state.sent[-1], "usb " + mode)
+check("usb is saved, not active", (board.hello()["usb"], board.hello()["usbSaved"]), ("frc", "sim"))
+check_raises("usb unknown mode", ValueError, board.usb, "keyboard")
+board.bind_axis(8)
+check("axis 8 for sim", board.state.sent[-1], "bind axis 8")
+board.enc_zero(5)
+check("enc zero 5", board.state.sent[-1], "enc zero 5")
+check_raises("axis 9", ValueError, board.bind_axis, 9)
+check_raises("axis 0", ValueError, board.unbind_axis, 0)
+
+board = MockBoard()
 check("hello", board.hello()["product"], "BBR Button Board")
 board.led(3, "red")
 check("led", board.state.sent[-1], "led 3 FF0000")

@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 
 from . import display, draw, rumble
-from .client import Board
+from .client import USB_MODES, Board
 from .crc import crc16_ccitt_false
 from .transport import LoopTransport
 
@@ -61,6 +61,7 @@ class MockState(object):
         self.display = display          # False emulates a board older than §14
         self.sound = sound              # §16 is still reserved: no sounder tile
         self.pixel = True               # §8.6 status pixel, on until turned off
+        self.usb_saved = "frc"          # §8.3: what `usb` set; the active one stays frc
         self.playing = {}               # addr -> (notes, repeat) or None
         self.volume = {}                # addr -> 0-255
         self.leds = {}                  # ("btn", n) / ("tile", addr, i) -> line
@@ -312,7 +313,7 @@ class MockState(object):
         return {"ok": True, "product": "BBR Button Board", "fw": "0.1.0", "proto": 1,
                 "serial": "MOCK", "hw": "A", "mapValid": True,
                 "tiles": len(self.tiles), "mode": "run",
-                "usb": "frc", "usbSaved": "frc", "pixel": self.pixel}
+                "usb": "frc", "usbSaved": self.usb_saved, "pixel": self.pixel}
 
     def _cmd_tiles(self, argv):
         return {"ok": True, "tiles": self.tiles}
@@ -437,6 +438,9 @@ class MockState(object):
         return {"ok": True}
 
     def _cmd_usb(self, argv):
+        if len(argv) != 1 or argv[0] not in USB_MODES:
+            raise _Err("args")
+        self.usb_saved = argv[0]
         return {"ok": True, "usb": argv[0], "pending": True}
 
     def _cmd_pixel(self, argv):

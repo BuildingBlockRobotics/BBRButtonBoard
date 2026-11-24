@@ -27,6 +27,14 @@ FLASH_READY_TIMEOUT = 4.0          # ENTER_BOOT, reset, GET_DESC until IN_BOOT
 FLASH_CHUNK_TIMEOUT = 2.0          # one WRITE and the tile's ACK
 FLASH_VERIFY_TIMEOUT = 6.0         # VERIFY, RESET, tile online again
 
+# The USB personalities `usb` takes (§8.3): desk from rev 0.49, midi 0.50, sim
+# 0.51. A master that predates one answers `args`, which reaches the caller
+# as CommandError.
+USB_MODES = ("frc", "xinput", "desk", "midi", "sim")
+# Encoder and stick axes, SIM_AXES in protocol.h (§8.11): `frc` reports the
+# first four, `sim` all eight.
+AXES = 8
+
 # `busy` on a `disp` command is the auxiliary queue (§3.2), or §14.9's picture
 # flash, saying it has no room this cycle. Waiting slightly under a slot period
 # means a refused line goes out on the first cycle with room; bounded by
@@ -235,8 +243,10 @@ class Board(object):
         return self.command("stats")
 
     def usb(self, mode):
-        if mode not in ("frc", "xinput"):
-            raise ValueError("usb mode must be frc or xinput, not %r" % (mode,))
+        """Set the persisted USB personality (§8.3). It takes effect after
+        `save()` and a replug or `reset()`; `hello()["usbSaved"]` shows it."""
+        if mode not in USB_MODES:
+            raise ValueError("usb mode must be one of %s, not %r" % (", ".join(USB_MODES), mode))
         return self.command("usb %s" % mode)
 
     def save(self):
@@ -291,16 +301,16 @@ class Board(object):
         return self.command("unbind %d %d %d" % (btn, _int_in("addr", addr, 1, 31),
                                                  _int_in("key", key, 0, 15)))
 
-    # encoders, §15.7
+    # encoders, §15.7; axes 5-8 move only under `sim` (§8.11)
     def bind_axis(self, n):
-        return self.command("bind axis %d" % _int_in("axis", n, 1, 4),
+        return self.command("bind axis %d" % _int_in("axis", n, 1, AXES),
                             timeout=self.BIND_TIMEOUT)
 
     def unbind_axis(self, n):
-        return self.command("unbind axis %d" % _int_in("axis", n, 1, 4))
+        return self.command("unbind axis %d" % _int_in("axis", n, 1, AXES))
 
     def enc_zero(self, n=None):
-        return self.command("enc zero" if n is None else "enc zero %d" % _int_in("axis", n, 1, 4))
+        return self.command("enc zero" if n is None else "enc zero %d" % _int_in("axis", n, 1, AXES))
 
     # map, §9.5
     def map_get(self):
