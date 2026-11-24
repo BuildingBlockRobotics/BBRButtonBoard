@@ -114,7 +114,7 @@ def find_panel(board, addr=None):
 
 
 def check_setup(board, mock=False):
-    """The mute key's button number, or None, and a word about anything that will not work as expected."""
+    """The button numbers that send Mute (a key and a knob's push can both), and a word about anything that will not work as expected."""
     if not mock and board.hello().get("usb") != "desk":     # the mock is always frc
         print("note: the board is not in desk mode, so the knob and the mute key will not reach the computer. "
               "The display still follows the volume.", file=sys.stderr)
@@ -123,8 +123,8 @@ def check_setup(board, mock=False):
     if not any(hid.get(str(e.get("cw"))) == "vol_up" for e in m.get("enc", [])):
         print("note: no knob turns the volume up. In the config app select the knob and pick Volume knob.",
               file=sys.stderr)
-    mute = next((int(b) for b, act in sorted(hid.items(), key=lambda kv: int(kv[0])) if act == "mute"), None)
-    if mute is None:
+    mute = sorted(int(b) for b, act in hid.items() if act == "mute")
+    if not mute:
         print("note: no key sends Mute, so no key will light. In the config app select the key and pick Mute.",
               file=sys.stderr)
     return mute
@@ -166,7 +166,7 @@ def main():
         if a.mock:                  # the set-up the docstring asks for: a volume knob and a mute key
             board.map_set(dict(board.map_get(), hid={"1": "mute", "2": "vol_up", "3": "vol_down"},
                                enc=[{"addr": 3, "idx": 0, "cw": 2, "ccw": 3}]))
-        mute_btn = check_setup(board, a.mock)
+        mute_btns = check_setup(board, a.mock)
         canvas = board.canvas(addr)
         frame = canvas.layer()
         frame.text(centred("VOLUME"), 8, "VOLUME", "white")
@@ -188,9 +188,13 @@ def main():
                 try:
                     draw(layers, reading)
                     canvas.flush()
-                    if mute_btn is not None and muted != lit:
+                    if mute_btns and muted != lit:
                         # Red while muted. Unmuted, the key goes back to its colour from the config app.
-                        board.led(mute_btn, "red") if muted else board.led_reset()
+                        if muted:
+                            for btn in mute_btns:
+                                board.led(btn, "red")
+                        else:
+                            board.led_reset()
                         lit = muted
                 except BoardError as e:     # a frame that failed did not land: start from a clear panel next time
                     canvas.forget()
